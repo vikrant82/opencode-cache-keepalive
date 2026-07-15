@@ -1,6 +1,7 @@
 # Task Completion
 
 Run the narrowest relevant checks, normally:
+
 1. `npm run typecheck`
 2. `npm run format:check`
 3. `npm run build` when packaging/entrypoints/declarations change.

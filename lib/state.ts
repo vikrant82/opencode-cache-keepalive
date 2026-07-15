@@ -26,7 +26,7 @@ export type SessionKeepalive = {
     windowEndsAt: number
     /** Epoch ms the next ping is due. */
     nextPingAt: number
-    /** Pings sent during the current idle stretch. */
+    /** Number of scheduled ping requests attempted during this warm window. */
     pingsSent: number
     /** A real turn is currently running. */
     busy: boolean

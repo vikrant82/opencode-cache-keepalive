@@ -8,6 +8,7 @@ const TICK_MS = 15_000
 const JITTER_MS = 15_000
 const CONTROL_POLL_MS = 1_000
 const STATUS_POLL_MS = 2_000
+const PING_STATUS_GRACE_MS = 5_000
 
 /**
  * The keepalive engine.
@@ -115,8 +116,17 @@ export class KeepaliveEngine {
             const status: string | undefined = event.properties?.status?.type
             if (!sessionID || !status) return
 
-            // The ping's own status transitions must not restart its idle window.
-            if (this.store.get(sessionID)?.warming) return
+            // The ping and its optional revert emit status transitions after their
+            // requests resolve. Ignore them briefly so they cannot re-arm/reset the
+            // active warm window. Real user-message events still stop warming now.
+            const current = this.store.get(sessionID)
+            if (
+                current?.warming ||
+                (status !== "idle" &&
+                    current?.lastPingAt &&
+                    Date.now() - current.lastPingAt < PING_STATUS_GRACE_MS)
+            )
+                return
 
             if (status === "idle") {
                 await this.armWindow(sessionID)
@@ -190,6 +200,9 @@ export class KeepaliveEngine {
         if (!s || s.warming || s.busy) return
 
         s.warming = true
+        // Count every request attempt. A transport/provider failure still consumed a
+        // scheduled ping slot and must remain visible in the footer.
+        s.pingsSent += 1
         this.store.persist()
         const startAt = Date.now()
 
@@ -210,9 +223,7 @@ export class KeepaliveEngine {
                 output: Number(info?.tokens?.output ?? 0),
             }
             s.lastPing = record
-            s.lastPingAt = record.at
-            s.pingsSent += 1
-            this.logger.info(
+            this.logger.dbg(
                 `ping ${short(sessionID)} ${record.hit ? "HIT" : "MISS"} ` +
                     `in=${record.input} read=${record.cacheRead} write=${record.cacheWrite} out=${record.output}`,
             )
@@ -222,6 +233,7 @@ export class KeepaliveEngine {
             this.logger.warn(`ping ${short(sessionID)} failed`, errText(err))
         } finally {
             s.warming = false
+            s.lastPingAt = Date.now()
             s.nextPingAt = Date.now() + jitter(this.config.intervalMs)
             this.store.persist()
         }

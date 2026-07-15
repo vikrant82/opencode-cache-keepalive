@@ -4,6 +4,7 @@ import { getConfig } from "./lib/config"
 import { KeepaliveEngine } from "./lib/keepalive"
 import { Logger } from "./lib/logger"
 import { isEligibleModel } from "./lib/model"
+import { logFilePath } from "./lib/paths"
 import { KeepaliveStore } from "./lib/state"
 import { keepaliveInstruction } from "./lib/system"
 
@@ -11,7 +12,7 @@ declare const __KEEPALIVE_VERSION__: string
 
 const server: Plugin = async (ctx, options) => {
     const config = getConfig(options as Record<string, unknown> | undefined)
-    const logger = new Logger(config.debug)
+    const logger = new Logger(config.debug, logFilePath())
 
     if (!config.enabled) {
         logger.info("disabled via config")

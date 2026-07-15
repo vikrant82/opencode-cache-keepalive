@@ -38,7 +38,11 @@ export function KeepaliveFooter(props: { theme: Theme; directory: string; sessio
             const match = readdirSync(stateDirectoryPath())
                 .filter((name) => name.startsWith("state-") && name.endsWith(".json"))
                 .map((name) => readState(join(stateDirectoryPath(), name)))
-                .find((snapshot) => snapshot?.sessions?.[sessionID])
+                .filter(
+                    (snapshot): snapshot is PersistedState =>
+                        snapshot?.sessions?.[sessionID] !== undefined,
+                )
+                .sort((a, b) => b.updatedAt - a.updatedAt)[0]
             setState(match)
         } catch {
             setState(undefined)
@@ -63,8 +67,11 @@ export function KeepaliveFooter(props: { theme: Theme; directory: string; sessio
 
         const interval = session.intervalMs || snapshot.intervalMs || 270_000
         const idleMs = Math.max(0, now() - (session.lastResponseAt || now()))
+        // `nextPingAt` is the scheduler's source of truth and includes the
+        // per-ping jitter. Counting from it keeps the two counters in step.
+        const nextPingAt = Math.max(session.nextPingAt || now(), now())
         const left = session.active
-            ? Math.max(0, Math.floor((session.windowEndsAt - now()) / interval))
+            ? Math.max(0, Math.ceil((session.windowEndsAt - nextPingAt) / interval))
             : 0
         const status: Status =
             !snapshot.enabled || !session.eligible

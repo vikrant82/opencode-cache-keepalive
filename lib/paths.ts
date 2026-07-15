@@ -29,3 +29,8 @@ export function stateDirectoryPath(): string {
 export function controlFilePath(): string {
     return join(stateDirectoryPath(), "control.json")
 }
+
+/** Append-only log file for the server plugin — never stdout, which corrupts the TUI. */
+export function logFilePath(): string {
+    return join(stateDirectoryPath(), "server.log")
+}
