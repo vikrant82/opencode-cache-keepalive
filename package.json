@@ -1,0 +1,71 @@
+{
+    "$schema": "https://json.schemastore.org/package.json",
+    "name": "@vikrant82/opencode-cache-keepalive",
+    "version": "0.1.0",
+    "type": "module",
+    "description": "OpenCode plugin that keeps provider prompt caches warm by sending invisible keepalive pings, with a live TUI readout",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        },
+        "./server": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        },
+        "./tui": {
+            "types": "./dist/tui.d.ts",
+            "import": "./tui.tsx"
+        }
+    },
+    "scripts": {
+        "clean": "rm -rf dist",
+        "build": "npm run clean && tsup && tsc --emitDeclarationOnly",
+        "dev": "opencode plugin dev",
+        "typecheck": "tsc --noEmit",
+        "format": "prettier --write .",
+        "format:check": "prettier --check ."
+    },
+    "keywords": [
+        "opencode",
+        "opencode-plugin",
+        "plugin",
+        "prompt-cache",
+        "cache",
+        "keepalive",
+        "github-copilot",
+        "anthropic",
+        "claude",
+        "gpt"
+    ],
+    "author": "vikrant82",
+    "license": "AGPL-3.0-or-later",
+    "peerDependencies": {
+        "@opencode-ai/plugin": ">=1.4.3",
+        "@opentui/core": "^0.4.2",
+        "@opentui/solid": "^0.4.2",
+        "solid-js": "^1.9.12"
+    },
+    "dependencies": {
+        "@opencode-ai/sdk": "^1.4.3"
+    },
+    "devDependencies": {
+        "@opencode-ai/plugin": "^1.4.3",
+        "@opentui/core": "^0.4.2",
+        "@opentui/solid": "^0.4.2",
+        "@types/node": "^22.0.0",
+        "prettier": "^3.4.0",
+        "solid-js": "^1.9.12",
+        "tsup": "^8.5.1",
+        "typescript": "^5.7.0"
+    },
+    "files": [
+        "dist/",
+        "lib/",
+        "tui.tsx",
+        "README.md",
+        "LICENSE"
+    ]
+}
