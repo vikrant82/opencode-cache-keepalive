@@ -1,7 +1,7 @@
 {
     "$schema": "https://json.schemastore.org/package.json",
     "name": "@vikrant82/opencode-cache-keepalive",
-    "version": "0.1.0",
+    "version": "0.1.1",
     "type": "module",
     "description": "OpenCode plugin that keeps provider prompt caches warm by sending invisible keepalive pings, with a live TUI readout",
     "main": "./dist/index.js",
