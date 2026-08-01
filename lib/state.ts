@@ -30,10 +30,14 @@ export type SessionKeepalive = {
     pingsSent: number
     /** A real turn is currently running. */
     busy: boolean
+    /** Epoch ms when `busy` was last set; used as a stuck-busy timeout backstop. */
+    busySince?: number
     /** A keepalive ping is currently in flight. */
     warming: boolean
     /** Within the warm window and actively scheduling pings. */
     active: boolean
+    /** True while `armWindow` is resolving session metadata (async guard). */
+    arming?: boolean
     /** Epoch ms of the last ping; retained only to ignore its late events. */
     lastPingAt?: number
     lastPing?: PingRecord
