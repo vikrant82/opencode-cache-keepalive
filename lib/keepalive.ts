@@ -9,6 +9,8 @@ const JITTER_MS = 15_000
 const CONTROL_POLL_MS = 1_000
 const STATUS_POLL_MS = 2_000
 const PING_STATUS_GRACE_MS = 5_000
+/** Backstop: clear a stuck `busy` flag after this long without an idle event. */
+const BUSY_TIMEOUT_MS = 300_000
 
 /**
  * The keepalive engine.
@@ -98,6 +100,7 @@ export class KeepaliveEngine {
             if (info?.role === "user") {
                 const s = this.store.ensure(sessionID)
                 s.busy = true
+                s.busySince = Date.now()
                 s.active = false
                 this.store.persist()
                 return
@@ -135,6 +138,7 @@ export class KeepaliveEngine {
 
             const s = this.store.ensure(sessionID)
             s.busy = true
+            s.busySince = Date.now()
             s.active = false
             this.store.persist()
             return
@@ -154,32 +158,52 @@ export class KeepaliveEngine {
         // Duplicate idle events (including late events from a ping) must not reset the
         // current idle stretch or extend its warm window.
         if (s.active && !s.busy) return
-        s.busy = false
-        await this.resolveSession(s)
+        // Serialize: only one armWindow may resolve metadata at a time per session.
+        // This prevents the session.status + session.idle double-event race from
+        // producing two concurrent resolveSession calls that can clobber each other.
+        if (s.arming) return
+        s.arming = true
+        try {
+            s.busy = false
+            s.busySince = undefined
+            await this.resolveSession(s)
 
-        // A new turn may have started while session metadata was being resolved.
-        if (s.busy || !this.enabled || !s.eligible) {
-            s.active = false
+            // A new turn may have started while session metadata was being resolved.
+            if (s.busy || !this.enabled || !s.eligible) {
+                s.active = false
+                this.store.persist()
+                return
+            }
+
+            const now = Date.now()
+            if (!s.lastResponseAt) s.lastResponseAt = now
+            s.idleSince = now
+            s.windowEndsAt = now + this.config.windowMs
+            s.nextPingAt = now + this.config.intervalMs
+            s.pingsSent = 0
+            s.lastPing = undefined
+            s.active = true
             this.store.persist()
-            return
+            this.logger.dbg(`armed ${short(sessionID)} model=${s.modelLabel}`)
+        } finally {
+            s.arming = false
         }
-
-        const now = Date.now()
-        if (!s.lastResponseAt) s.lastResponseAt = now
-        s.idleSince = now
-        s.windowEndsAt = now + this.config.windowMs
-        s.nextPingAt = now + this.config.intervalMs
-        s.pingsSent = 0
-        s.lastPing = undefined
-        s.active = true
-        this.store.persist()
-        this.logger.dbg(`armed ${short(sessionID)} model=${s.modelLabel}`)
     }
 
     private async tick(): Promise<void> {
         if (!this.enabled) return
         const now = Date.now()
         for (const s of this.store.all()) {
+            // Backstop: if busy is stuck (missed idle event + reconcile failure),
+            // clear it after BUSY_TIMEOUT_MS so the session can re-arm.
+            if (s.busy && s.busySince && now - s.busySince > BUSY_TIMEOUT_MS) {
+                this.logger.dbg(`busy timeout ${short(s.sessionID)} — clearing stuck flag`)
+                s.busy = false
+                s.busySince = undefined
+                void this.armWindow(s.sessionID)
+                continue
+            }
+
             if (!s.eligible || !s.active || s.busy || s.warming) continue
 
             if (now >= s.windowEndsAt) {
@@ -234,7 +258,13 @@ export class KeepaliveEngine {
         } finally {
             s.warming = false
             s.lastPingAt = Date.now()
-            s.nextPingAt = Date.now() + jitter(this.config.intervalMs)
+            // Schedule relative to the intended time so ping duration doesn't
+            // compound drift. Floor at now+1s to avoid immediate re-fire if the
+            // ping took longer than the interval.
+            s.nextPingAt = Math.max(
+                Date.now() + 1_000,
+                s.nextPingAt + jitter(this.config.intervalMs),
+            )
             this.store.persist()
         }
     }
@@ -309,8 +339,10 @@ export class KeepaliveEngine {
                 session.active = false
                 continue
             }
+            // Only re-arm sessions that have had a real turn (cache to warm) and
+            // are not currently occupied.
             if (!session.eligible || session.busy || session.warming) continue
-            if (!session.lastResponseAt) session.lastResponseAt = now
+            if (!session.lastResponseAt) continue
             session.idleSince = now
             session.windowEndsAt = now + this.config.windowMs
             session.nextPingAt = now + this.config.intervalMs
