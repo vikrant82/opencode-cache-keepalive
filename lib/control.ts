@@ -9,10 +9,10 @@ export type KeepaliveControl = {
     updatedAt: number
 }
 
-export function readControl(): KeepaliveControl | undefined {
+export function readControl(directory: string): KeepaliveControl | undefined {
     try {
         const value = JSON.parse(
-            readFileSync(controlFilePath(), "utf8"),
+            readFileSync(controlFilePath(directory), "utf8"),
         ) as Partial<KeepaliveControl>
         if (value.version !== 1 || typeof value.enabled !== "boolean") return undefined
         if (typeof value.updatedAt !== "number") return undefined
@@ -22,13 +22,13 @@ export function readControl(): KeepaliveControl | undefined {
     }
 }
 
-export async function writeControl(enabled: boolean): Promise<KeepaliveControl> {
+export async function writeControl(enabled: boolean, directory: string): Promise<KeepaliveControl> {
     const value: KeepaliveControl = {
         version: 1,
         enabled,
         updatedAt: Date.now(),
     }
-    const path = controlFilePath()
+    const path = controlFilePath(directory)
     const tmp = `${path}.${process.pid}.${value.updatedAt}.tmp`
     await mkdir(dirname(path), { recursive: true })
     await writeFile(tmp, `${JSON.stringify(value)}\n`, "utf8")
