@@ -22,7 +22,7 @@ const server: Plugin = async (ctx, options) => {
     if (isSecureMode()) configureClientAuth(ctx.client)
 
     const store = new KeepaliveStore(config, ctx.directory)
-    const engine = new KeepaliveEngine(ctx.client, config, store, logger)
+    const engine = new KeepaliveEngine(ctx.client, config, store, logger, ctx.directory)
     engine.start()
 
     const version = typeof __KEEPALIVE_VERSION__ !== "undefined" ? __KEEPALIVE_VERSION__ : "dev"

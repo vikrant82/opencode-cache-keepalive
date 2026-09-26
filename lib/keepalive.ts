@@ -36,8 +36,9 @@ export class KeepaliveEngine {
         private readonly config: KeepaliveConfig,
         private readonly store: KeepaliveStore,
         private readonly logger: Logger,
+        private readonly directory: string,
     ) {
-        const control = readControl()
+        const control = readControl(directory)
         this.enabled = control?.enabled ?? config.enabled
         this.controlUpdatedAt = control?.updatedAt ?? 0
         this.store.setEnabled(this.enabled)
@@ -326,7 +327,7 @@ export class KeepaliveEngine {
     }
 
     private pollControl(): void {
-        const control = readControl()
+        const control = readControl(this.directory)
         if (!control || control.updatedAt <= this.controlUpdatedAt) return
         this.controlUpdatedAt = control.updatedAt
         if (control.enabled === this.enabled) return

@@ -25,9 +25,14 @@ export function stateDirectoryPath(): string {
     )
 }
 
-/** Runtime on/off control written by the TUI and read by the server plugin. */
-export function controlFilePath(): string {
-    return join(stateDirectoryPath(), "control.json")
+/**
+ * Runtime on/off control written by the TUI and read by the server plugin.
+ * Scoped per directory (like the state file) so toggling keepalive in one
+ * project does not affect every other open opencode session.
+ */
+export function controlFilePath(directory: string): string {
+    const key = createHash("sha256").update(directory).digest("hex").slice(0, 16)
+    return join(stateDirectoryPath(), `control-${key}.json`)
 }
 
 /** Append-only log file for the server plugin — never stdout, which corrupts the TUI. */
