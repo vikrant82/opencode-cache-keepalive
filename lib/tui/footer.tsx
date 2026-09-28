@@ -6,7 +6,7 @@ import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { stateDirectoryPath, stateFilePath } from "../paths"
 import type { PersistedSession, PersistedState, PingRecord } from "../state"
-import { kfmt, mmss } from "./format"
+import { formatDuration, kfmt, mmss } from "./format"
 
 type Theme = Record<string, any>
 type Status = "waiting" | "off" | "warming" | "busy" | "armed" | "cold"
@@ -16,6 +16,8 @@ type Derived = {
     left: number
     status: Status
     lastPing?: PingRecord
+    /** Effective ping interval for this project, when the server has reported it. */
+    intervalMs?: number
 }
 
 /**
@@ -60,12 +62,25 @@ export function KeepaliveFooter(props: { theme: Theme; directory: string; sessio
         const snapshot = state()
         const sessionID = props.sessionID
         if (!snapshot || !sessionID) {
-            return { idleMs: 0, sent: 0, left: 0, status: "waiting" }
+            return {
+                idleMs: 0,
+                sent: 0,
+                left: 0,
+                status: "waiting",
+                intervalMs: snapshot?.intervalMs,
+            }
         }
         const session: PersistedSession | undefined = snapshot.sessions?.[sessionID]
-        if (!session) return { idleMs: 0, sent: 0, left: 0, status: "waiting" }
+        if (!session)
+            return {
+                idleMs: 0,
+                sent: 0,
+                left: 0,
+                status: "waiting",
+                intervalMs: snapshot.intervalMs,
+            }
 
-        const interval = session.intervalMs || snapshot.intervalMs || 270_000
+        const interval = snapshot.intervalMs || session.intervalMs || 270_000
         const idleMs = Math.max(0, now() - (session.lastResponseAt || now()))
         // `nextPingAt` is the scheduler's source of truth and includes the
         // per-ping jitter. Counting from it keeps the two counters in step.
@@ -84,7 +99,14 @@ export function KeepaliveFooter(props: { theme: Theme; directory: string; sessio
                       ? "armed"
                       : "cold"
 
-        return { idleMs, sent: session.pingsSent || 0, left, status, lastPing: session.lastPing }
+        return {
+            idleMs,
+            sent: session.pingsSent || 0,
+            left,
+            status,
+            lastPing: session.lastPing,
+            intervalMs: interval,
+        }
     }
 
     const theme = props.theme
@@ -100,6 +122,11 @@ export function KeepaliveFooter(props: { theme: Theme; directory: string; sessio
                         <text fg={statusColor(theme, data().status)}>
                             {statusLabel(data().status)}
                         </text>
+                        <Show when={data().intervalMs}>
+                            {(interval: () => number) => (
+                                <text fg={theme.textMuted}>every {formatDuration(interval())}</text>
+                            )}
+                        </Show>
                     </box>
 
                     <box flexDirection="row" gap={1}>
