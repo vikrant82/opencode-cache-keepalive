@@ -47,7 +47,7 @@ const server: Plugin = async (ctx, options) => {
         // Backstop: if the model ignores the instruction and tries a tool during a
         // ping, block it — the ping turn is going to be reverted anyway.
         "tool.execute.before": async (input) => {
-            if (engine.isWarming(input.sessionID)) {
+            if (engine.shouldBlockTools(input.sessionID)) {
                 throw new Error("cache-keepalive: tools are disabled during a keepalive ping")
             }
         },

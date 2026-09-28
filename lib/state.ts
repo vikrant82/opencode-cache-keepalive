@@ -12,6 +12,40 @@ export type PingRecord = {
     output: number
 }
 
+/**
+ * Request settings of the last real user turn. A ping must replay them exactly:
+ * a prompt without explicit settings runs as opencode's default agent with no
+ * variant, which changes the request shape (missing the cache) and overwrites
+ * the session's persisted agent/model/variant.
+ */
+export type PingRequest = {
+    agent?: string
+    providerID: string
+    modelID: string
+    variant?: string
+}
+
+/** Bookkeeping for the ping request currently in flight. */
+export type InflightPing = {
+    /** Epoch ms the ping attempt began (before the pre-flight status check). */
+    startedAt: number
+    /** The prompt request has been issued. */
+    sent: boolean
+    /** The ping's own user message, identified by its ping-token text part. */
+    messageID?: string
+    /**
+     * New user messages seen during the ping whose text has not yet been observed.
+     * Each is classified by its first text part: the ping token marks our own
+     * message, anything else a real turn.
+     */
+    pending: Map<string, unknown>
+    /**
+     * A real user message appeared while the ping was in flight. opencode joins such
+     * a prompt to the running ping loop, so the rest of the run is real work.
+     */
+    interrupted: boolean
+}
+
 /** Live per-session bookkeeping held by the server plugin. */
 export type SessionKeepalive = {
     sessionID: string
@@ -30,15 +64,20 @@ export type SessionKeepalive = {
     pingsSent: number
     /** A real turn is currently running. */
     busy: boolean
-    /** Epoch ms when `busy` was last set; used as a stuck-busy timeout backstop. */
-    busySince?: number
     /** A keepalive ping is currently in flight. */
     warming: boolean
+    /** The in-flight ping; set exactly while `warming` is true. */
+    ping?: InflightPing
+    /** ID and creation time of the newest user message seen, to tell new turns from re-emitted old messages. */
+    lastUserID?: string
+    lastUserAt?: number
+    /** Settings of the last real user turn, replayed by pings. */
+    request?: PingRequest
     /** Within the warm window and actively scheduling pings. */
     active: boolean
     /** True while `armWindow` is resolving session metadata (async guard). */
     arming?: boolean
-    /** Epoch ms of the last ping; retained only to ignore its late events. */
+    /** Epoch ms the last sent ping finished; ignores its late events and marks the last cache touch. */
     lastPingAt?: number
     lastPing?: PingRecord
 }
@@ -115,8 +154,11 @@ export class KeepaliveStore {
         return [...this.sessions.values()]
     }
 
-    /** Atomically persist a lean snapshot for the TUI. Never throws to callers. */
-    persist(): void {
+    /**
+     * Atomically persist a lean snapshot for the TUI. Never throws or rejects; the
+     * returned promise resolves once this snapshot and every earlier one are written.
+     */
+    persist(): Promise<void> {
         const snapshot: PersistedState = {
             version: 1,
             updatedAt: Date.now(),
@@ -146,6 +188,7 @@ export class KeepaliveStore {
 
         const write = () => atomicWrite(stateFilePath(this.directory), JSON.stringify(snapshot))
         this.writeQueue = this.writeQueue.then(write, write)
+        return this.writeQueue
     }
 }
 
