@@ -54,6 +54,7 @@ beforeEach(async (t) => {
 
 afterEach(async (t) => {
     harness.engine.stop()
+    await harness.store.persist()
     ;(t as TestContext).mock.timers.reset()
     if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME
     else process.env.XDG_DATA_HOME = previousDataHome

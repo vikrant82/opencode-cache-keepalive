@@ -111,16 +111,23 @@ export class KeepaliveStore {
     private readonly sessions = new Map<string, SessionKeepalive>()
     private writeQueue: Promise<void> = Promise.resolve()
     private enabled: boolean
+    private intervalMs: number
 
     constructor(
         private readonly config: KeepaliveConfig,
         private readonly directory: string,
     ) {
         this.enabled = config.enabled
+        this.intervalMs = config.intervalMs
     }
 
     setEnabled(enabled: boolean): void {
         this.enabled = enabled
+    }
+
+    /** Effective ping interval (runtime override or config) reported to the TUI. */
+    setIntervalMs(intervalMs: number): void {
+        this.intervalMs = intervalMs
     }
 
     get(sessionID: string): SessionKeepalive | undefined {
@@ -163,7 +170,7 @@ export class KeepaliveStore {
             version: 1,
             updatedAt: Date.now(),
             enabled: this.enabled,
-            intervalMs: this.config.intervalMs,
+            intervalMs: this.intervalMs,
             windowMs: this.config.windowMs,
             sessions: Object.fromEntries(
                 this.all().map((s) => [
@@ -175,7 +182,7 @@ export class KeepaliveStore {
                         idleSince: s.idleSince,
                         windowEndsAt: s.windowEndsAt,
                         nextPingAt: s.nextPingAt,
-                        intervalMs: this.config.intervalMs,
+                        intervalMs: this.intervalMs,
                         pingsSent: s.pingsSent,
                         busy: s.busy,
                         warming: s.warming,

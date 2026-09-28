@@ -43,6 +43,7 @@ export class KeepaliveEngine {
     private controlUpdatedAt = 0
     private reconcilingStatus = false
     private enabled: boolean
+    private intervalOverride: number | undefined
 
     constructor(
         private readonly client: any,
@@ -53,8 +54,15 @@ export class KeepaliveEngine {
     ) {
         const control = readControl(directory)
         this.enabled = control?.enabled ?? config.enabled
+        this.intervalOverride = control?.intervalMs
         this.controlUpdatedAt = control?.updatedAt ?? 0
         this.store.setEnabled(this.enabled)
+        this.store.setIntervalMs(this.intervalMs)
+    }
+
+    /** Effective ping interval: the runtime override from the control file, else config. */
+    private get intervalMs(): number {
+        return this.intervalOverride ?? this.config.intervalMs
     }
 
     start(): void {
@@ -65,7 +73,7 @@ export class KeepaliveEngine {
         this.store.persist()
         this.logger.info(
             `started (${this.enabled ? "enabled" : "disabled"}, ` +
-                `interval=${Math.round(this.config.intervalMs / 1000)}s, ` +
+                `interval=${Math.round(this.intervalMs / 1000)}s, ` +
                 `window=${Math.round(this.config.windowMs / 60_000)}m)`,
         )
     }
@@ -282,7 +290,7 @@ export class KeepaliveEngine {
     private openWindow(s: SessionKeepalive, now: number): void {
         s.idleSince = now
         s.windowEndsAt = s.lastResponseAt + this.config.windowMs
-        s.nextPingAt = Math.max(now, lastCacheTouch(s) + this.config.intervalMs)
+        s.nextPingAt = Math.max(now, lastCacheTouch(s) + this.intervalMs)
         s.pingsSent = 0
         s.lastPing = undefined
         s.active = true
@@ -291,7 +299,7 @@ export class KeepaliveEngine {
     /** False once the cache has gone too long without a request to still be trusted warm. */
     private cacheMayBeWarm(s: SessionKeepalive, now: number): boolean {
         const touch = lastCacheTouch(s)
-        return touch > 0 && now - touch <= COLD_AFTER_INTERVALS * this.config.intervalMs
+        return touch > 0 && now - touch <= COLD_AFTER_INTERVALS * this.intervalMs
     }
 
     private async tick(): Promise<void> {
@@ -415,8 +423,8 @@ export class KeepaliveEngine {
                 // Schedule relative to the intended time so ping duration doesn't
                 // compound drift, but never into the past: that would fire catch-up
                 // pings on consecutive ticks.
-                const next = s.nextPingAt + jitter(this.config.intervalMs)
-                s.nextPingAt = next > now ? next : now + jitter(this.config.intervalMs)
+                const next = s.nextPingAt + jitter(this.intervalMs)
+                s.nextPingAt = next > now ? next : now + jitter(this.intervalMs)
             }
             this.store.persist()
             if (ping.sent && ping.interrupted) {
@@ -547,24 +555,45 @@ export class KeepaliveEngine {
         const control = readControl(this.directory)
         if (!control || control.updatedAt <= this.controlUpdatedAt) return
         this.controlUpdatedAt = control.updatedAt
-        if (control.enabled === this.enabled) return
-
-        this.enabled = control.enabled
-        this.store.setEnabled(control.enabled)
         const now = Date.now()
-        for (const session of this.store.all()) {
-            if (!control.enabled) {
-                session.active = false
-                continue
+        let changed = false
+
+        if (control.intervalMs !== this.intervalOverride) {
+            this.intervalOverride = control.intervalMs
+            this.store.setIntervalMs(this.intervalMs)
+            // Re-anchor pending pings on the new cadence. An in-flight ping schedules
+            // its successor with the new interval when it finishes.
+            for (const session of this.store.all()) {
+                if (session.active && !session.warming)
+                    session.nextPingAt = Math.max(now, lastCacheTouch(session) + this.intervalMs)
             }
-            // Only re-arm sessions with a real response whose cache may still be warm,
-            // and that are not currently occupied.
-            if (!session.eligible || session.busy || session.warming) continue
-            if (!session.lastResponseAt || !this.cacheMayBeWarm(session, now)) continue
-            this.openWindow(session, now)
+            this.logger.info(
+                `runtime interval ${Math.round(this.intervalMs / 1000)}s` +
+                    (control.intervalMs === undefined ? " (config)" : ""),
+            )
+            changed = true
         }
-        this.store.persist()
-        this.logger.info(`runtime ${control.enabled ? "enabled" : "disabled"}`)
+
+        const enabled = control.enabled ?? this.config.enabled
+        if (enabled !== this.enabled) {
+            this.enabled = enabled
+            this.store.setEnabled(enabled)
+            for (const session of this.store.all()) {
+                if (!enabled) {
+                    session.active = false
+                    continue
+                }
+                // Only re-arm sessions with a real response whose cache may still be warm,
+                // and that are not currently occupied.
+                if (!session.eligible || session.busy || session.warming) continue
+                if (!session.lastResponseAt || !this.cacheMayBeWarm(session, now)) continue
+                this.openWindow(session, now)
+            }
+            this.logger.info(`runtime ${enabled ? "enabled" : "disabled"}`)
+            changed = true
+        }
+
+        if (changed) this.store.persist()
     }
 
     /** Recover when a session.status idle event is missed by reconciling with the API. */

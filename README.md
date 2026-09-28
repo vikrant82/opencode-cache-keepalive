@@ -18,6 +18,7 @@ Keep LLM prompt caches warm during idle periods with invisible pings and a live 
 - **Live TUI footer**: idle time, pings sent/left, last ping cache hit/miss with token counts
 - **Synthetic ping reversion**: removes `~`/`~` turns from conversation history
 - **Runtime toggle**: `/keepalive-toggle`, `/keepalive-on`, `/keepalive-off` slash commands
+- **Runtime interval override**: set a per-project ping interval with presets, custom durations, or reset to the plugin default
 - **Secure mode support**: works with `OPENCODE_SERVER_PASSWORD`
 - **Configurable provider/model allowlists**
 
@@ -85,7 +86,7 @@ All options can be set via plugin config in `opencode.json` or environment varia
 The plugin registers a sidebar footer showing live keepalive status:
 
 ```
-keepalive armed
+keepalive armed every 4m 30s
 idle 03:42 · sent 2 · left 10
 ✓ hit input 12.4k · read 11.8k · write 0
 ```
@@ -93,6 +94,7 @@ idle 03:42 · sent 2 · left 10
 Metrics:
 
 - **idle**: Time since last real assistant response
+- **every**: Effective ping interval, including any runtime project override
 - **sent**: Ping attempts in current warm window (includes failures)
 - **left**: Estimated pings remaining before window expires
 - **hit/miss**: Cache hit status of last ping with token breakdown
@@ -102,6 +104,7 @@ Slash commands (available in TUI palette):
 - `/keepalive-toggle` — Toggle keepalive on/off at runtime
 - `/keepalive-on` — Enable keepalive
 - `/keepalive-off` — Disable keepalive
+- `/keepalive-interval` — Set this project's ping interval at runtime (presets for 5-minute and 30-minute caches, custom durations, or reset to the plugin default); persists per project until changed
 
 ## How It Works
 
