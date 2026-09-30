@@ -2,17 +2,17 @@ import { createHash } from "node:crypto"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-/**
- * Absolute path to the JSON state file shared between the server plugin (writer)
- * and the TUI plugin (reader). Both processes run on the same machine, so a file
- * under opencode's plugin storage dir is the simplest cross-process channel.
- *
- * Mirrors the storage layout used by other opencode plugins:
- *   <XDG_DATA_HOME | ~/.local/share>/opencode/storage/plugin/keepalive/state.json
- */
-export function stateFilePath(directory: string): string {
-    const key = createHash("sha256").update(directory).digest("hex").slice(0, 16)
-    return join(stateDirectoryPath(), `state-${key}.json`)
+/** Stable short directory key shared by that directory's state-file readers/writers. */
+export function stateDirectoryKey(directory: string): string {
+    return createHash("sha256").update(directory).digest("hex").slice(0, 16)
+}
+
+/** Filename for one process/plugin-instance state snapshot. */
+export function instanceStateFilePath(directory: string, pid: number, instanceId: string): string {
+    return join(
+        stateDirectoryPath(),
+        `state-v2-${stateDirectoryKey(directory)}-${pid}-${instanceId}.json`,
+    )
 }
 
 export function stateDirectoryPath(): string {
@@ -26,9 +26,7 @@ export function stateDirectoryPath(): string {
 }
 
 /**
- * Runtime on/off control written by the TUI and read by the server plugin.
- * Scoped per directory (like the state file) so toggling keepalive in one
- * project does not affect every other open opencode session.
+ * Session runtime controls are stored by directory, with entries keyed by session ID.
  */
 export function controlFilePath(directory: string): string {
     const key = createHash("sha256").update(directory).digest("hex").slice(0, 16)

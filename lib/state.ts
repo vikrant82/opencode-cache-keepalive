@@ -1,211 +1,201 @@
-import { mkdir, rename, writeFile } from "node:fs/promises"
-import { dirname } from "node:path"
-import type { KeepaliveConfig } from "./config"
-import { stateFilePath } from "./paths"
+import { randomUUID } from "node:crypto"
+import { readdirSync, readFileSync, unlinkSync } from "node:fs"
+import { mkdir, rename, unlink, writeFile } from "node:fs/promises"
+import { dirname, join } from "node:path"
+import type { Logger } from "./logger"
+import { instanceStateFilePath, stateDirectoryKey, stateDirectoryPath } from "./paths"
+import type { ProcessTotals, SessionWarmEntry, WarmStateSink } from "./types"
 
-export type PingRecord = {
-    at: number
-    hit: boolean
-    input: number
-    cacheRead: number
-    cacheWrite: number
-    output: number
+const CLEANUP_INTERVAL_MS = 10 * 60_000
+const PERSIST_DEBOUNCE_MS = 250
+
+type StateFile = {
+    version: 2
+    pid: number
+    instanceId: string
+    updatedAt: number
+    sessions: Record<string, SessionWarmEntry>
+    totals: ProcessTotals
 }
+
+export type StateStoreOptions = { logger?: Logger; now?: () => number }
 
 /**
- * Request settings of the last real user turn. A ping must replay them exactly:
- * a prompt without explicit settings runs as opencode's default agent with no
- * variant, which changes the request shape (missing the cache) and overwrites
- * the session's persisted agent/model/variant.
+ * Create an isolated v2 snapshot writer. Mutations are debounced, dispose flushes
+ * the latest snapshot before removing it, and all filesystem failures stay
+ * best-effort so state reporting cannot disrupt replay execution.
  */
-export type PingRequest = {
-    agent?: string
-    providerID: string
-    modelID: string
-    variant?: string
-}
-
-/** Bookkeeping for the ping request currently in flight. */
-export type InflightPing = {
-    /** Epoch ms the ping attempt began (before the pre-flight status check). */
-    startedAt: number
-    /** The prompt request has been issued. */
-    sent: boolean
-    /** The ping's own user message, identified by its ping-token text part. */
-    messageID?: string
-    /**
-     * New user messages seen during the ping whose text has not yet been observed.
-     * Each is classified by its first text part: the ping token marks our own
-     * message, anything else a real turn.
-     */
-    pending: Map<string, unknown>
-    /**
-     * A real user message appeared while the ping was in flight. opencode joins such
-     * a prompt to the running ping loop, so the rest of the run is real work.
-     */
-    interrupted: boolean
-}
-
-/** Live per-session bookkeeping held by the server plugin. */
-export type SessionKeepalive = {
-    sessionID: string
-    /** Whether the session's provider/model pair supports cache warming. */
-    eligible: boolean
-    modelLabel?: string
-    /** Epoch ms of the last real assistant response (excludes ping replies). */
-    lastResponseAt: number
-    /** Epoch ms the current idle stretch began. */
-    idleSince: number
-    /** Epoch ms after which warming stops and the cache is allowed to go cold. */
-    windowEndsAt: number
-    /** Epoch ms the next ping is due. */
-    nextPingAt: number
-    /** Number of scheduled ping requests attempted during this warm window. */
-    pingsSent: number
-    /** A real turn is currently running. */
-    busy: boolean
-    /** A keepalive ping is currently in flight. */
-    warming: boolean
-    /** The in-flight ping; set exactly while `warming` is true. */
-    ping?: InflightPing
-    /** ID and creation time of the newest user message seen, to tell new turns from re-emitted old messages. */
-    lastUserID?: string
-    lastUserAt?: number
-    /** Settings of the last real user turn, replayed by pings. */
-    request?: PingRequest
-    /** Within the warm window and actively scheduling pings. */
-    active: boolean
-    /** True while `armWindow` is resolving session metadata (async guard). */
-    arming?: boolean
-    /** Epoch ms the last sent ping finished; ignores its late events and marks the last cache touch. */
-    lastPingAt?: number
-    lastPing?: PingRecord
-}
-
-/** Lean projection persisted to disk for the TUI reader. */
-export type PersistedSession = {
-    eligible: boolean
-    modelLabel?: string
-    lastResponseAt: number
-    idleSince: number
-    windowEndsAt: number
-    nextPingAt: number
-    intervalMs: number
-    pingsSent: number
-    busy: boolean
-    warming: boolean
-    active: boolean
-    lastPing?: PingRecord
-}
-
-export type PersistedState = {
-    version: 1
-    updatedAt: number
-    enabled: boolean
-    intervalMs: number
-    windowMs: number
-    sessions: Record<string, PersistedSession>
-}
-
-export class KeepaliveStore {
-    private readonly sessions = new Map<string, SessionKeepalive>()
-    private writeQueue: Promise<void> = Promise.resolve()
-    private enabled: boolean
-    private intervalMs: number
-
-    constructor(
-        private readonly config: KeepaliveConfig,
-        private readonly directory: string,
-    ) {
-        this.enabled = config.enabled
-        this.intervalMs = config.intervalMs
+export function createStateStore(
+    directory: string,
+    options: StateStoreOptions = {},
+): WarmStateSink {
+    const now = options.now ?? Date.now
+    const instanceId = randomUUID()
+    const filePath = instanceStateFilePath(directory, process.pid, instanceId)
+    const sessions = new Map<string, SessionWarmEntry>()
+    let totals: ProcessTotals = {
+        replays: 0,
+        avoidedTokens: 0,
+        replayReadTokens: 0,
+        resumeHits: 0,
+        resumeMisses: 0,
     }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let cleanupTimer: ReturnType<typeof setInterval> | undefined
+    let writeQueue: Promise<void> = Promise.resolve()
+    let disposed = false
 
-    setEnabled(enabled: boolean): void {
-        this.enabled = enabled
-    }
-
-    /** Effective ping interval (runtime override or config) reported to the TUI. */
-    setIntervalMs(intervalMs: number): void {
-        this.intervalMs = intervalMs
-    }
-
-    get(sessionID: string): SessionKeepalive | undefined {
-        return this.sessions.get(sessionID)
-    }
-
-    ensure(sessionID: string): SessionKeepalive {
-        const existing = this.sessions.get(sessionID)
-        if (existing) return existing
-        const created: SessionKeepalive = {
-            sessionID,
-            eligible: false,
-            lastResponseAt: 0,
-            idleSince: 0,
-            windowEndsAt: 0,
-            nextPingAt: 0,
-            pingsSent: 0,
-            busy: false,
-            warming: false,
-            active: false,
+    const flush = (): Promise<void> => {
+        if (timer) clearTimeout(timer)
+        timer = undefined
+        const snapshot: StateFile = {
+            version: 2,
+            pid: process.pid,
+            instanceId,
+            updatedAt: now(),
+            sessions: Object.fromEntries(sessions),
+            totals,
         }
-        this.sessions.set(sessionID, created)
-        return created
+        const write = () => atomicWrite(filePath, JSON.stringify(snapshot))
+        writeQueue = writeQueue.then(write, write)
+        return writeQueue
     }
 
-    remove(sessionID: string): void {
-        this.sessions.delete(sessionID)
+    const schedule = () => {
+        if (disposed || timer) return
+        timer = setTimeout(() => {
+            timer = undefined
+            void flush()
+        }, PERSIST_DEBOUNCE_MS)
     }
 
-    all(): SessionKeepalive[] {
-        return [...this.sessions.values()]
-    }
-
-    /**
-     * Atomically persist a lean snapshot for the TUI. Never throws or rejects; the
-     * returned promise resolves once this snapshot and every earlier one are written.
-     */
-    persist(): Promise<void> {
-        const snapshot: PersistedState = {
-            version: 1,
-            updatedAt: Date.now(),
-            enabled: this.enabled,
-            intervalMs: this.intervalMs,
-            windowMs: this.config.windowMs,
-            sessions: Object.fromEntries(
-                this.all().map((s) => [
-                    s.sessionID,
-                    {
-                        eligible: s.eligible,
-                        modelLabel: s.modelLabel,
-                        lastResponseAt: s.lastResponseAt,
-                        idleSince: s.idleSince,
-                        windowEndsAt: s.windowEndsAt,
-                        nextPingAt: s.nextPingAt,
-                        intervalMs: this.intervalMs,
-                        pingsSent: s.pingsSent,
-                        busy: s.busy,
-                        warming: s.warming,
-                        active: s.active,
-                        lastPing: s.lastPing,
-                    } satisfies PersistedSession,
-                ]),
-            ),
+    const onExit = () => {
+        try {
+            unlinkSync(filePath)
+        } catch {
+            // Exit cleanup is best-effort.
         }
+    }
 
-        const write = () => atomicWrite(stateFilePath(this.directory), JSON.stringify(snapshot))
-        this.writeQueue = this.writeQueue.then(write, write)
-        return this.writeQueue
+    cleanupStateFiles(directory, options.logger)
+    cleanupTimer = setInterval(
+        () => cleanupStateFiles(directory, options.logger),
+        CLEANUP_INTERVAL_MS,
+    )
+    process.on("exit", onExit)
+
+    return {
+        upsert(entry) {
+            if (disposed) return
+            sessions.set(entry.sessionID, { ...entry })
+            schedule()
+        },
+        remove(sessionID) {
+            if (disposed) return
+            sessions.delete(sessionID)
+            schedule()
+        },
+        setTotals(value) {
+            if (disposed) return
+            totals = { ...value }
+            schedule()
+        },
+        async dispose() {
+            if (disposed) return
+            disposed = true
+            if (timer) clearTimeout(timer)
+            timer = undefined
+            if (cleanupTimer) clearInterval(cleanupTimer)
+            cleanupTimer = undefined
+            process.off("exit", onExit)
+            await flush()
+            await unlink(filePath).catch(() => {})
+        },
+    }
+}
+
+/** Return the newest self-contained entry for a session across matching v2 files. */
+export function readSessionEntry(
+    directory: string,
+    sessionID: string,
+): SessionWarmEntry | undefined {
+    let freshest: SessionWarmEntry | undefined
+    for (const snapshot of readSnapshots(directory)) {
+        const entry = snapshot.sessions[sessionID]
+        if (entry && (!freshest || entry.updatedAt > freshest.updatedAt)) freshest = entry
+    }
+    return freshest
+}
+
+/** Sum process-level totals from live snapshots for this directory. */
+export function readProcessTotals(directory: string): ProcessTotals {
+    const totals = {
+        replays: 0,
+        avoidedTokens: 0,
+        replayReadTokens: 0,
+        resumeHits: 0,
+        resumeMisses: 0,
+    }
+    for (const snapshot of readSnapshots(directory)) {
+        totals.replays += snapshot.totals.replays
+        totals.avoidedTokens += snapshot.totals.avoidedTokens
+        totals.replayReadTokens += snapshot.totals.replayReadTokens
+        totals.resumeHits += snapshot.totals.resumeHits
+        totals.resumeMisses += snapshot.totals.resumeMisses
+    }
+    return totals
+}
+
+/** Remove only v2 snapshots whose owner PID is confirmed dead. */
+export function cleanupStateFiles(directory: string, logger?: Logger): void {
+    try {
+        const prefix = `state-v2-${stateDirectoryKey(directory)}-`
+        for (const name of readdirSync(stateDirectoryPath())) {
+            const match = name.match(new RegExp(`^${prefix}(\\d+)-[^/]+\\.json$`))
+            if (!match) continue
+            const pid = Number(match[1])
+            try {
+                process.kill(pid, 0)
+            } catch (error) {
+                if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+                    unlinkSync(join(stateDirectoryPath(), name))
+                    logger?.dbg("Removed stale state snapshot", { pid })
+                }
+            }
+        }
+    } catch {
+        // Storage can be unavailable during startup/shutdown; cleanup is optional.
+    }
+}
+
+function readSnapshots(directory: string): StateFile[] {
+    const prefix = `state-v2-${stateDirectoryKey(directory)}-`
+    try {
+        return readdirSync(stateDirectoryPath())
+            .filter((name) => name.startsWith(prefix) && name.endsWith(".json"))
+            .map((name) => {
+                try {
+                    const value = JSON.parse(
+                        readFileSync(join(stateDirectoryPath(), name), "utf8"),
+                    ) as StateFile
+                    return value.version === 2 && value.sessions && value.totals ? value : undefined
+                } catch {
+                    return undefined
+                }
+            })
+            .filter((value): value is StateFile => value !== undefined)
+    } catch {
+        return []
     }
 }
 
 async function atomicWrite(path: string, contents: string): Promise<void> {
     try {
-        const tmp = `${path}.${process.pid}.${Date.now()}.tmp`
+        const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`
         await mkdir(dirname(path), { recursive: true })
         await writeFile(tmp, `${contents}\n`, "utf8")
         await rename(tmp, path)
     } catch {
-        // Persistence is best-effort; the TUI readout simply falls behind.
+        // Best-effort persistence; stale display data is safer than disrupting replay.
     }
 }

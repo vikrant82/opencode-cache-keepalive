@@ -1,101 +1,133 @@
 export type KeepaliveConfig = {
-    /** Master switch. When false the plugin registers no timers or hooks. */
     enabled: boolean
-    /** Milliseconds between pings. Must stay under the shortest supported provider TTL. */
-    intervalMs: number
-    /**
-     * How long to keep warming after the last real response before giving up and
-     * letting the cache go cold. The default follows the Copilot Claude
-     * write/read break-even; providers with automatic caching may be cheaper.
-     */
-    windowMs: number
-    /**
-     * Append a stable keepalive instruction to the system prompt so the model
-     * answers a `~` ping with a single `~` token and never calls tools. The
-     * instruction is added to real turns too, so the cached prefix stays identical.
-     */
-    injectSystemInstruction: boolean
-    /** The single character/token used as the keepalive suffix. */
-    pingToken: string
-    /** Remove synthetic ping turns after measuring their cache usage. */
-    revertPing: boolean
-    /** Warm subagent/child sessions too. Off by default to avoid wasted pings. */
+    intervals: Record<string, number>
+    hosts: string[]
+    cacheReadFactor: number
+    missFactor: number
+    maxReplaysPerGap: "auto" | number
     includeChildSessions: boolean
+    replayTimeoutMs: number
+    maxStoredBytes: number
     debug: boolean
-    /** providerID substrings eligible for warming (cache-controlled providers). */
-    providerAllowlist: string[]
-    /** modelID substrings eligible for warming. */
-    modelAllowlist: string[]
 }
 
 const DEFAULTS: KeepaliveConfig = {
     enabled: true,
-    intervalMs: 270_000, // 4.5 min — below the shortest supported cache TTL
-    windowMs: 3_300_000, // 55 min — the Copilot Claude write/read break-even
-    injectSystemInstruction: true,
-    pingToken: "~",
-    revertPing: true,
+    intervals: { claude: 285_000, gpt: 1_680_000 },
+    hosts: ["githubcopilot.com"],
+    cacheReadFactor: 0.1,
+    missFactor: 1,
+    maxReplaysPerGap: "auto",
     includeChildSessions: false,
+    replayTimeoutMs: 60_000,
+    maxStoredBytes: 67_108_864,
     debug: false,
-    providerAllowlist: ["copilot"],
-    modelAllowlist: ["claude", "anthropic", "sonnet", "opus", "haiku", "gpt"],
 }
 
-export function getConfig(options: Record<string, unknown> | undefined): KeepaliveConfig {
-    const o = options ?? {}
-    const env = process.env
+const DEPRECATED = [
+    "intervalMs",
+    "intervalSeconds",
+    "windowMs",
+    "windowMinutes",
+    "revertPing",
+    "pingToken",
+    "injectSystemInstruction",
+    "providerAllowlist",
+    "modelAllowlist",
+    "claudeBusyWarm",
+    "claudeBusyWarmIntervalMs",
+    "claudeBusyWarmWindowMs",
+]
+const warnedDeprecated = new Set<string>()
 
+export function getConfig(
+    options: Record<string, unknown> | undefined,
+    warn: (message: string) => void = () => {},
+): KeepaliveConfig {
+    const option = options ?? {}
+    const env = process.env
+    for (const key of DEPRECATED) {
+        if (key in option && !warnedDeprecated.has(key)) {
+            warnedDeprecated.add(key)
+            warn(`deprecated option ${key} is ignored`)
+        }
+    }
+    const parseJson = (raw: string | undefined): unknown => {
+        if (!raw) return undefined
+        try {
+            return JSON.parse(raw)
+        } catch {
+            return undefined
+        }
+    }
+    const intervals = objectOption(
+        option.intervals ?? parseJson(env.OPENCODE_KEEPALIVE_INTERVALS),
+        DEFAULTS.intervals,
+    )
+    const hosts = listOption(
+        option.hosts ?? parseJson(env.OPENCODE_KEEPALIVE_HOSTS),
+        DEFAULTS.hosts,
+    )
+    const maxRaw = option.maxReplaysPerGap ?? env.OPENCODE_KEEPALIVE_MAX_REPLAYS_PER_GAP
+    const maxReplaysPerGap =
+        maxRaw === "auto"
+            ? "auto"
+            : positiveNumber(maxRaw) !== undefined
+              ? positiveNumber(maxRaw)!
+              : DEFAULTS.maxReplaysPerGap
     return {
-        enabled: boolOpt(o.enabled, env.OPENCODE_KEEPALIVE_ENABLED !== "false" && DEFAULTS.enabled),
-        intervalMs: durationOpt(
-            o.intervalMs,
-            o.intervalSeconds,
-            numEnv(env.OPENCODE_KEEPALIVE_INTERVAL_MS, DEFAULTS.intervalMs),
+        enabled: boolOption(
+            option.enabled,
+            env.OPENCODE_KEEPALIVE_ENABLED === undefined
+                ? DEFAULTS.enabled
+                : env.OPENCODE_KEEPALIVE_ENABLED !== "false",
         ),
-        windowMs: durationOpt(
-            o.windowMs,
-            o.windowMinutes ? Number(o.windowMinutes) * 60 : undefined,
-            numEnv(env.OPENCODE_KEEPALIVE_WINDOW_MS, DEFAULTS.windowMs),
+        intervals,
+        hosts,
+        cacheReadFactor:
+            positiveNumber(option.cacheReadFactor ?? env.OPENCODE_KEEPALIVE_CACHE_READ_FACTOR) ??
+            DEFAULTS.cacheReadFactor,
+        missFactor:
+            positiveNumber(option.missFactor ?? env.OPENCODE_KEEPALIVE_MISS_FACTOR) ??
+            DEFAULTS.missFactor,
+        maxReplaysPerGap,
+        includeChildSessions: boolOption(
+            option.includeChildSessions,
+            env.OPENCODE_KEEPALIVE_INCLUDE_CHILD_SESSIONS === "true" ||
+                DEFAULTS.includeChildSessions,
         ),
-        injectSystemInstruction: boolOpt(
-            o.injectSystemInstruction,
-            DEFAULTS.injectSystemInstruction,
-        ),
-        pingToken:
-            typeof o.pingToken === "string" && o.pingToken.length > 0
-                ? o.pingToken
-                : DEFAULTS.pingToken,
-        revertPing: boolOpt(
-            o.revertPing,
-            env.OPENCODE_KEEPALIVE_REVERT_PING !== "false" && DEFAULTS.revertPing,
-        ),
-        includeChildSessions: boolOpt(o.includeChildSessions, DEFAULTS.includeChildSessions),
-        debug: boolOpt(o.debug, env.OPENCODE_KEEPALIVE_DEBUG === "true"),
-        providerAllowlist: listOpt(o.providerAllowlist, DEFAULTS.providerAllowlist),
-        modelAllowlist: listOpt(o.modelAllowlist, DEFAULTS.modelAllowlist),
+        replayTimeoutMs:
+            positiveNumber(option.replayTimeoutMs ?? env.OPENCODE_KEEPALIVE_REPLAY_TIMEOUT_MS) ??
+            DEFAULTS.replayTimeoutMs,
+        maxStoredBytes:
+            positiveNumber(option.maxStoredBytes ?? env.OPENCODE_KEEPALIVE_MAX_STORED_BYTES) ??
+            DEFAULTS.maxStoredBytes,
+        debug: boolOption(option.debug, env.OPENCODE_KEEPALIVE_DEBUG === "true"),
     }
 }
 
-function boolOpt(value: unknown, fallback: boolean): boolean {
+function boolOption(value: unknown, fallback: boolean): boolean {
     return typeof value === "boolean" ? value : fallback
 }
 
-function listOpt(value: unknown, fallback: string[]): string[] {
+function positiveNumber(value: unknown): number | undefined {
+    const parsed = typeof value === "string" ? Number(value) : value
+    return typeof parsed === "number" && Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+}
+
+function objectOption(value: unknown, fallback: Record<string, number>): Record<string, number> {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return fallback
+    const entries = Object.entries(value).flatMap(([key, interval]) => {
+        const parsed = positiveNumber(interval)
+        return parsed === undefined ? [] : [[key.toLowerCase(), parsed] as const]
+    })
+    return entries.length ? Object.fromEntries(entries) : fallback
+}
+
+function listOption(value: unknown, fallback: string[]): string[] {
     if (!Array.isArray(value)) return fallback
-    const filtered = value.filter((item): item is string => typeof item === "string")
-    return filtered.length > 0 ? filtered : fallback
-}
-
-/** Accept an explicit `*Ms` option, a `*Seconds` option, or fall back. */
-function durationOpt(ms: unknown, seconds: unknown, fallback: number): number {
-    if (typeof ms === "number" && Number.isFinite(ms) && ms > 0) return ms
-    if (typeof seconds === "number" && Number.isFinite(seconds) && seconds > 0)
-        return seconds * 1000
-    return fallback
-}
-
-function numEnv(raw: string | undefined, fallback: number): number {
-    if (!raw) return fallback
-    const value = Number(raw)
-    return Number.isFinite(value) && value > 0 ? value : fallback
+    const values = value.filter(
+        (item): item is string => typeof item === "string" && item.length > 0,
+    )
+    return values.length ? values : fallback
 }

@@ -1,9 +1,9 @@
 {
     "$schema": "https://json.schemastore.org/package.json",
     "name": "@vikrant82/opencode-cache-keepalive",
-    "version": "0.1.6",
+    "version": "0.2.0",
     "type": "module",
-    "description": "OpenCode plugin that keeps provider prompt caches warm by sending invisible keepalive pings, with a live TUI readout",
+    "description": "OpenCode plugin that uses bounded provider-request replay to keep prompt caches warm, with a live TUI readout",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "exports": {
@@ -68,6 +68,7 @@
         "lib/",
         "tui.tsx",
         "README.md",
+        "MIGRATION.md",
         "LICENSE"
     ]
 }
