@@ -7,6 +7,10 @@ export function mmss(ms: number): string {
 
 export function kfmt(n: number): string {
     if (!Number.isFinite(n) || n <= 0) return "0"
+    if (n >= 1_000_000) {
+        const m = n / 1_000_000
+        return `${m >= 10 ? Math.round(m) : m.toFixed(1)}M`
+    }
     if (n < 1000) return `${Math.round(n)}`
     const k = n / 1000
     return `${k >= 10 ? Math.round(k) : k.toFixed(1)}k`
